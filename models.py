@@ -18,3 +18,4 @@ class Camera(Base):
   name = Column(String)
   url = Column(String)
   points = Column(String)
+  detected = Column(Boolean)

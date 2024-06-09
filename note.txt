@@ -1,0 +1,6 @@
+export CUDA_VISIBLE_DEVICES=""
+
+
+toc do
+deploy
+do chinh xac
