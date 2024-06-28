@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Response, BackgroundTasks, Request, HTTPException, status
+from fastapi import FastAPI, Depends, Response, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -14,10 +14,11 @@ import asyncio
 import ffmpeg
 import models
 from database import engine, get_db
-from routes import camera
 from sqlalchemy.orm import Session
 import schemas
 from queue import Queue
+import ast
+import numpy as np
 
 app = FastAPI(openapi_url="/openapi.json")
 
@@ -51,16 +52,8 @@ app.add_middleware(CustomCORSMiddleware)
 
 models.Base.metadata.create_all(engine)
 
-app.include_router(camera.router)
-
 # Initialize YOLO model
 model = YOLO("yolov8m.pt")
-
-# Define a shared state dictionary to track the streaming state
-streaming_state = {"active": True}
-
-# Dictionary to keep track of camera threads and their stop events
-# camera_threads = {}
 
 # Dictionary to keep track of camera threads, queues, and stop events
 camera_info = {}
@@ -79,7 +72,7 @@ class Notification(BaseModel):
 async def create_notification(notification: Notification):
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post('http://localhost:8000/notifications', json=notification.dict())
+            response = await client.post('https://leech-just-multiply.ngrok-free.app/notifications', json=notification.dict())
             response.raise_for_status()  # Raise an exception for 4xx/5xx responses
             data = response.json()  # Parse the JSON response
             return data
@@ -101,15 +94,13 @@ def save_video(queue, db: Session, stop_event, detected: bool = False):
         if not detected:
             return
         # cap = cv2.VideoCapture(url)
-        frame_rate_limit = 1000
+        frame_rate_limit = 10
         prev_frame_time = 0
         fourcc = cv2.VideoWriter_fourcc(*'MJPG')
         out = None
         recording = False
-        # while cap.isOpened():
-        #     ret, frame = cap.read()
         while True:
-            frame, url = queue.get()
+            frame, crop_frame, fix_size, url = queue.get()
             if(stop_event.is_set()):
                 break
             if frame is None:
@@ -122,30 +113,31 @@ def save_video(queue, db: Session, stop_event, detected: bool = False):
                 continue
 
             prev_frame_time = current_frame_time
-            results = model.predict(frame, conf=0.42)[0]
+            results = model.predict(crop_frame, conf=0.42, device='cpu')[0]
 
             person_detected = False
             for box in results.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 label = box.cls
                 if label == 0:  # Assuming class 0 represents person
-                    frame = cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    frame = cv2.rectangle(frame, (x1 + fix_size[1], y1 + fix_size[0]), (x2 + fix_size[1], y2 + fix_size[0]), (0, 255, 0), 2)
                     person_detected = True
 
             if person_detected and not recording:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                video_path = os.path.join(video_folder, f"person_detected_{timestamp}.avi")
-                out = cv2.VideoWriter(video_path, fourcc, 5, (frame.shape[1], frame.shape[0]))
+                timestamp = datetime.now().strftime("%Y:%m:%d %H:%M:%S")
+                timestampNameFile = datetime.now().strftime("%Y%m%d%_H%M%S")
+                video_path = os.path.join(video_folder, f"person_detected_{timestampNameFile}.avi")
+                out = cv2.VideoWriter(video_path, fourcc, 3, (frame.shape[1], frame.shape[0]))
                 recording = True
                 print(f"Started recording: {video_path}")
                 # Call the create_notification function here
                 camera = db.query(models.Camera).filter(models.Camera.url == url).first()
                 notification = Notification(
-                    title="Person Detected",
-                    description=f"A person was detected at {timestamp}",
-                    videoUrl=f"http://0.0.0.0:8001/{video_path.replace('.avi', '.mp4')}",
-                    camera_id=camera.camera_id,  # Example camera ID
-                    user_id=camera.user_id     # Example user ID
+                    title="Phát hiện ngừoi",
+                    description=f"Phát hiện người vào lúc {timestamp}",
+                    videoUrl=f"https://improved-nicely-imp.ngrok-free.app/{video_path.replace('.avi', '.mp4')}",
+                    camera_id=camera.camera_id,
+                    user_id=camera.user_id
                 )
                 asyncio.run(create_notification(notification))
 
@@ -156,7 +148,7 @@ def save_video(queue, db: Session, stop_event, detected: bool = False):
                 out.release()
                 recording = False
                 print(f"Stopped recording")
-                mp4_path = convert_avi_to_mp4(video_path)
+                convert_avi_to_mp4(video_path)
 
         # cap.release()
         if recording:
@@ -165,33 +157,43 @@ def save_video(queue, db: Session, stop_event, detected: bool = False):
         print(f"Error occurred: {e}")
         time.sleep(5)
 
-def capture_frames(url, queue: Queue, stop_event):
+def capture_frames(url, queue: Queue, stop_event, points):
     try:
-        print("#"*100)
-        # Open video source (change the path to your video file or camera index)
-        # Cam ngoai cua
-        # cap = ffmpegcv.VideoCaptureStream(url)
+        arrayPoints = ast.literal_eval(points)
+
         cap = cv2.VideoCapture(url)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         # cap = ffmpegcv.VideoCaptureStream("rtsp://admin:Cntt123a@namthan.ddns.net:554")
-        # cap = cv2.VideoCapture("rtsp://admin:JCNMJQ@namthan.ddns.net:554", cv2.CAP_FFMPEG)
-        # Cam su dung
-        # cap = cv2.VideoCapture("rtsp://admin:PSJCJW@192.168.1.107:554")
-        # Cam cong ty
-        # cap = cv2.VideoCapture("rtsp://admin:ECSIAQ@192.168.1.85:554")
-        # Set frame rate limit (e.g., 10 frames per second)
         frame_rate_limit = 10
         prev_frame_time = 0
+        # Get frame width and height
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        points_pixel = []
+        if len(arrayPoints) == 4:
+            if(arrayPoints[0] > arrayPoints[2]):
+                arrayPoints[0], arrayPoints[2] = arrayPoints[2], arrayPoints[0]
+            if(arrayPoints[1] > arrayPoints[3]):
+                arrayPoints[1], arrayPoints[3] = arrayPoints[3], arrayPoints[1]
+            points_pixel = [[int(arrayPoints[0] * frame_width), int(arrayPoints[1] * frame_height)], [int(arrayPoints[2] * frame_width), int(arrayPoints[1] * frame_height)], [int(arrayPoints[2] * frame_width), int(arrayPoints[3] * frame_height)], [int(arrayPoints[0] * frame_width), int(arrayPoints[3] * frame_height)]]
+        elif len(arrayPoints) > 4 & len(arrayPoints) % 2 == 0:
+            for i in range(0, len(arrayPoints), 2):
+                points_pixel.append([int(arrayPoints[i] * frame_width), int(arrayPoints[i + 1] * frame_height)])
+
+        if not cap.isOpened():
+            del camera_info[url]
+            raise ValueError("Unable to open video stream")
         while cap.isOpened():
             if stop_event.is_set():
+                print("Stopping thread")
                 break
             if not cap.read():
-                continue
+                print("Failed to read frame")
+                break
             ret, frame = cap.read()
-            if not ret:
-                continue
-            if frame is None:
+            if not ret or frame is None:
                 print("Failed to capture frame")
-                continue
+                break
 
             # Get the current time
             current_frame_time = time.time()
@@ -204,118 +206,82 @@ def capture_frames(url, queue: Queue, stop_event):
 
             # Update the previous frame time
             prev_frame_time = current_frame_time
+            if len(points_pixel) > 0:
+                # Create a mask from the points and apply it to the frame
+                mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                points_array = np.array([points_pixel], dtype=np.int32)
+                cv2.fillPoly(mask, points_array, 255)
 
-            queue.put((frame, url))
+                # Apply the mask to the frame
+                crop_frame = cv2.bitwise_and(frame, frame, mask=mask)
 
+                # Find bounding box of the polygon to crop the region of interest
+                x, y, w, h = cv2.boundingRect(points_array)
+                crop_frame = crop_frame[y:y+h, x:x+w]
+                fix_size = [y, x]
+            else:
+                crop_frame = frame
+                fix_size = [0, 0]
+            if queue.qsize() < 2:
+                queue.put((frame, crop_frame, fix_size, url))
         cap.release()
+        return
     except Exception as e:
         print(f"Error occurred: {e}")
         time.sleep(5)  # Adjust the retry interval as needed
 
-# # Define a generator function to read frames from the video source
-# def generate_frames(url):
-#     try:
-#         print("#"*100)
-#         # Open video source (change the path to your video file or camera index)
-#         # Cam ngoai cua
-#         # cap = ffmpegcv.VideoCaptureStream(url)
-#         cap = cv2.VideoCapture(url)
-#         # cap = ffmpegcv.VideoCaptureStream("rtsp://admin:Cntt123a@namthan.ddns.net:554")
-#         # cap = cv2.VideoCapture("rtsp://admin:JCNMJQ@namthan.ddns.net:554", cv2.CAP_FFMPEG)
-#         # Cam su dung
-#         # cap = cv2.VideoCapture("rtsp://admin:PSJCJW@192.168.1.107:554")
-#         # Cam cong ty
-#         # cap = cv2.VideoCapture("rtsp://admin:ECSIAQ@192.168.1.85:554")
-#         # Set frame rate limit (e.g., 10 frames per second)
-#         frame_rate_limit = 10
-#         prev_frame_time = 0
-#         while cap.isOpened():
-#             if not streaming_state["active"]:
-#                 break
-#             if not cap.read():
-#                 continue
-#             ret, frame = cap.read()
-#             if not ret:
-#                 continue
-#             if frame is None:
-#                 print("Failed to capture frame")
-#                 continue
-
-#             # Get the current time
-#             current_frame_time = time.time()
-#             # Calculate the time difference
-#             time_diff = current_frame_time - prev_frame_time
-
-#             # If the time difference is less than the frame interval, skip this frame
-#             if time_diff < 1.0 / frame_rate_limit:
-#                 continue
-
-#             # Update the previous frame time
-#             prev_frame_time = current_frame_time
-
-#             # Encode the frame as JPEG
-#             # Resize frame for faster processing
-#             # cropped_frame = cv2.resize(cropped_frame, (1280, 640))
-#             # Predict using YOLO model
-#             results = model.predict(frame)[0]
-#             # Process the results
-#             for box in results.boxes:
-#                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-#                 label = box.cls
-#                 if label == 0:  # Assuming class 0 represents person
-#                     frame = cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-#             ret, buffer = cv2.imencode('.jpg', frame)
-#             frame_bytes = buffer.tobytes()
-#             yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-
-#             # img = Image.fromarray(cropped_frame)
-#             # img_buffer = io.BytesIO()
-#             # img.save(img_buffer, format='JPEG')
-#             # frame_bytes = img_buffer.getvalue()
-
-#             # yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-#         # Release video source when done
-#         cap.release()
-#     except Exception as e:
-#         print(f"Error occurred: {e}")
-#         # Wait for some time before retrying
-#         time.sleep(5)  # Adjust the retry interval as needed
-
 # Define a generator function to read frames from the queue
-def generate_frames(queue: Queue, detected: bool = False):
-    while True:
-        frame, url = queue.get()
-        if frame is None:
-            break
-        if detected:
-            results = model.predict(frame, conf=0.42)[0]
-            for box in results.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                label = box.cls
-                if label == 0:  # Assuming class 0 represents person
-                    frame = cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+def generate_frames(queue: Queue, streaming_active: threading.Event, detected: bool = False):
+    try:
+        while streaming_active.is_set():
+            frame, crop_frame, fix_size, url = queue.get()
+            if crop_frame is None:
+                print("Failed to capture frame")
+                continue
+            if detected:
+                results = model.predict(crop_frame, conf=0.42, save=False, save_txt=False, show=False)[0]
+                for box in results.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    label = box.cls
+                    if label == 0:  # Assuming class 0 represents person
+                        frame = cv2.rectangle(frame, (x1 + fix_size[1], y1 + fix_size[0]), (x2 + fix_size[1], y2 + fix_size[0]), (0, 255, 0), 2)
 
-        ret, buffer = cv2.imencode('.jpg', frame)
-        frame_bytes = buffer.tobytes()
-        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            ret, buffer = cv2.imencode('.jpg', frame)
+            data_encode = np.array(buffer)
+            frame_bytes = data_encode.tobytes()
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+    except Exception as e:
+        print(f"Error occurred: {e}")
+        time.sleep(5)
 
 @app.get("/")
-async def video_feed(url = "/", db: Session = Depends(get_db)):
-    streaming_state["active"] = True
+async def video_feed(url = "/", username = "", password = "", db: Session = Depends(get_db)):
+    box = db.query(models.User).filter(models.User.username == username, models.User.password == password).first()
+    if not box:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'User with username {username} not found')
     global camera_info
     camera = db.query(models.Camera).filter(models.Camera.url == url).first()
-    # if not camera:
-    #     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Camera with URL {url} not found')
+    if not camera:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Camera with URL {url} not found')
     if url not in camera_info:
+        print("Creating new thread")
         camera_info[url] = {
-            "queue": Queue(),
-            "stop_event": threading.Event()
+            "queue": Queue(maxsize=10),
+            "stop_event": threading.Event(),
+            "streaming_active": threading.Event()
         }
-        thread = camera_info[url]["thread"] = threading.Thread(target=capture_frames, args=(url, camera_info[url]["queue"], camera_info[url]["stop_event"]), daemon=True)
+        thread = camera_info[url]["thread"] = threading.Thread(target=capture_frames, args=(url, camera_info[url]["queue"], camera_info[url]["stop_event"], camera.points), daemon=True)
         thread.start()
         camera_info[url]["camera_thread"] = (thread, camera_info[url]["stop_event"])
-    return StreamingResponse(generate_frames(camera_info[url]["queue"], camera.detected), media_type="multipart/x-mixed-replace; boundary=frame")
+    else:
+        if not camera_info[url]["camera_thread"][0].is_alive():
+            print("Thread is not alive")
+            camera_info[url]["stop_event"].clear()
+            camera_info[url]["thread"] = threading.Thread(target=capture_frames, args=(url, camera_info[url]["queue"], camera_info[url]["stop_event"], camera.points), daemon=True)
+            camera_info[url]["thread"].start()
+            camera_info[url]["camera_thread"] = (camera_info[url]["thread"], camera_info[url]["stop_event"])
+    camera_info[url]["streaming_active"].set()
+    return StreamingResponse(generate_frames(camera_info[url]["queue"], camera_info[url]["streaming_active"], camera.detected), media_type="multipart/x-mixed-replace; boundary=frame")
 
 @app.post("/camera", status_code=status.HTTP_201_CREATED)
 def create(request: schemas.Camera, db: Session = Depends(get_db)):
@@ -325,22 +291,64 @@ def create(request: schemas.Camera, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(new_camera)
         if request.url not in camera_info:
+            print("Creating new thread")
             camera_info[request.url] = {
-                "queue": Queue(),
-                "stop_event": threading.Event()
+                "queue": Queue(maxsize=10),
+                "stop_event": threading.Event(),
+                "streaming_active": threading.Event()
             }
-            camera_info[request.url]["thread"] = threading.Thread(target=capture_frames, args=(request.url, camera_info[request.url]["queue"], camera_info[request.url]["stop_event"]), daemon=True)
+            camera_info[request.url]["thread"] = threading.Thread(target=capture_frames, args=(request.url, camera_info[request.url]["queue"], camera_info[request.url]["stop_event"], request.points), daemon=True)
             camera_info[request.url]["thread"].start()
+            camera_info[request.url]["camera_thread"] = (camera_info[request.url]["thread"], camera_info[request.url]["stop_event"])
 
         thread = threading.Thread(target=save_video, args=(camera_info[request.url]["queue"], db, camera_info[request.url]["stop_event"], new_camera.detected), daemon=True)
         thread.start()
 
-        camera_info[request.url]["camera_thread"] = (thread, camera_info[request.url]["stop_event"])
 
         return new_camera
     except Exception as e:
             print(f"Error occurred: {e}")
             time.sleep(2)
+
+@app.put("/camera/{camera_id}", status_code=status.HTTP_202_ACCEPTED)
+def update(request: schemas.Camera, camera_id: int, db: Session = Depends(get_db)):
+    try:
+        print(request.dict())
+        camera_query = db.query(models.Camera).filter(models.Camera.camera_id == camera_id)
+        camera = camera_query.first()
+        if not camera:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Camera with id {camera_id} not found")
+
+        old_url = camera.url
+        new_url = request.url
+        if old_url in camera_info:
+            print("del"*10)
+            camera_info[old_url]["streaming_active"].clear()
+            camera_info[old_url]["stop_event"].set()
+            camera_info[old_url]["thread"].join()
+            del camera_info[old_url]
+
+        if new_url not in camera_info:
+            print("new"*10)
+            camera_info[new_url] = {
+                "queue": Queue(maxsize=10),
+                "stop_event": threading.Event(),
+                "streaming_active": threading.Event()
+            }
+            thread = threading.Thread(target=capture_frames, args=(new_url, camera_info[new_url]["queue"], camera_info[new_url]["stop_event"], request.points), daemon=True)
+            camera_info[new_url]["thread"] = thread
+            thread.start()
+            camera_info[new_url]["camera_thread"] = (thread, camera_info[new_url]["stop_event"])
+
+        thread = threading.Thread(target=save_video, args=(camera_info[request.url]["queue"], db, camera_info[request.url]["stop_event"], request.detected), daemon=True)
+        thread.start()
+
+        camera_query.update(request.dict())
+        db.commit()
+        return "Updated"
+    except Exception as e:
+        print(f"Error occurred: {e}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"fail")
 
 @app.delete("/camera/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_camera(camera_id: int, db: Session = Depends(get_db)):
@@ -351,10 +359,13 @@ def delete_camera(camera_id: int, db: Session = Depends(get_db)):
         url = camera.url
         if url in camera_info:
             # Stop the thread and event associated with the camera's URL
-            print(f"Stopping camera thread for URL: {url}" * 10)
-            camera_thread, stop_event = camera_info[url]["camera_thread"]
-            stop_event.set()
-            camera_thread.join()
+            try:
+                camera_thread, stop_event = camera_info[url]["camera_thread"]
+                camera_info[url]["streaming_active"].clear()
+                stop_event.set()
+                camera_thread.join()
+            except Exception as e:
+                print(f"Error occurred: {e}")
 
             # Remove camera information from the dictionary
             del camera_info[url]
@@ -382,12 +393,23 @@ async def get_video(filename: str):
         return StreamingResponse(open(file_path, "rb"), media_type="video/mp4")
     return {"error": "File not found"}
 
-@app.get("/stop-streaming")
-async def stop_streaming():
-    # Set the streaming state to inactive
-    streaming_state["active"] = False
-    return {"message": "Streaming stopped"}
+# Define a route to stop video streaming for a specific camera URL
+@app.get("/stop_stream")
+async def stop_streaming(urllink = ""):
+    global camera_info
+    print(camera_info)
+    for url in camera_info:
+        if(urllink != url):
+            print("Stopping thread"*10)
+            print(url)
+            print(urllink)
+            camera_info[url]["streaming_active"].clear()  # Stop streaming frames
 
+async def stop_streaming_by_url(url = ""):
+    global camera_info
+    for url in camera_info:
+        if(url == url):
+            camera_info[url]["streaming_active"].clear()  # Stop streaming frames
 # app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 if __name__ == "__main__":
     import uvicorn
