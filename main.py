@@ -36,7 +36,6 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-# Set up CORS middleware for API routes
 origins = ["*"]
 
 app.add_middleware(
@@ -47,15 +46,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Apply the custom CORS middleware
 app.add_middleware(CustomCORSMiddleware)
 
 models.Base.metadata.create_all(engine)
 
-# Initialize YOLO model
 model = YOLO("yolov8m.pt")
 
-# Dictionary to keep track of camera threads, queues, and stop events
 camera_info = {}
 
 video_folder = "videos"
@@ -81,19 +77,16 @@ async def create_notification(notification: Notification):
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Internal server error: {str(exc)}")
 
-# Function to convert .avi to .mp4
 def convert_avi_to_mp4(avi_path):
     mp4_path = avi_path.replace('.avi', '.mp4')
     ffmpeg.input(avi_path).output(mp4_path).run()
     os.remove(avi_path)
     return mp4_path
 
-# Define a function to save videos when a person is detected
 def save_video(queue, db: Session, stop_event, detected: bool = False):
     try:
         if not detected:
             return
-        # cap = cv2.VideoCapture(url)
         frame_rate_limit = 10
         prev_frame_time = 0
         fourcc = cv2.VideoWriter_fourcc(*'MJPG')
@@ -119,7 +112,7 @@ def save_video(queue, db: Session, stop_event, detected: bool = False):
             for box in results.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 label = box.cls
-                if label == 0:  # Assuming class 0 represents person
+                if label == 0:
                     frame = cv2.rectangle(frame, (x1 + fix_size[1], y1 + fix_size[0]), (x2 + fix_size[1], y2 + fix_size[0]), (0, 255, 0), 2)
                     person_detected = True
 
@@ -130,7 +123,7 @@ def save_video(queue, db: Session, stop_event, detected: bool = False):
                 out = cv2.VideoWriter(video_path, fourcc, 3, (frame.shape[1], frame.shape[0]))
                 recording = True
                 print(f"Started recording: {video_path}")
-                # Call the create_notification function here
+
                 camera = db.query(models.Camera).filter(models.Camera.url == url).first()
                 notification = Notification(
                     title="Phát hiện ngừoi",
@@ -150,7 +143,6 @@ def save_video(queue, db: Session, stop_event, detected: bool = False):
                 print(f"Stopped recording")
                 convert_avi_to_mp4(video_path)
 
-        # cap.release()
         if recording:
             out.release()
     except Exception as e:
@@ -166,7 +158,7 @@ def capture_frames(url, queue: Queue, stop_event, points):
         # cap = ffmpegcv.VideoCaptureStream("rtsp://admin:Cntt123a@namthan.ddns.net:554")
         frame_rate_limit = 10
         prev_frame_time = 0
-        # Get frame width and height
+
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         points_pixel = []
@@ -195,27 +187,20 @@ def capture_frames(url, queue: Queue, stop_event, points):
                 print("Failed to capture frame")
                 break
 
-            # Get the current time
             current_frame_time = time.time()
-            # Calculate the time difference
             time_diff = current_frame_time - prev_frame_time
 
-            # If the time difference is less than the frame interval, skip this frame
             if time_diff < 1.0 / frame_rate_limit:
                 continue
 
-            # Update the previous frame time
             prev_frame_time = current_frame_time
             if len(points_pixel) > 0:
-                # Create a mask from the points and apply it to the frame
                 mask = np.zeros(frame.shape[:2], dtype=np.uint8)
                 points_array = np.array([points_pixel], dtype=np.int32)
                 cv2.fillPoly(mask, points_array, 255)
 
-                # Apply the mask to the frame
                 crop_frame = cv2.bitwise_and(frame, frame, mask=mask)
 
-                # Find bounding box of the polygon to crop the region of interest
                 x, y, w, h = cv2.boundingRect(points_array)
                 crop_frame = crop_frame[y:y+h, x:x+w]
                 fix_size = [y, x]
@@ -228,9 +213,8 @@ def capture_frames(url, queue: Queue, stop_event, points):
         return
     except Exception as e:
         print(f"Error occurred: {e}")
-        time.sleep(5)  # Adjust the retry interval as needed
+        time.sleep(5)
 
-# Define a generator function to read frames from the queue
 def generate_frames(queue: Queue, streaming_active: threading.Event, detected: bool = False):
     try:
         while streaming_active.is_set():
@@ -243,7 +227,7 @@ def generate_frames(queue: Queue, streaming_active: threading.Event, detected: b
                 for box in results.boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     label = box.cls
-                    if label == 0:  # Assuming class 0 represents person
+                    if label == 0:
                         frame = cv2.rectangle(frame, (x1 + fix_size[1], y1 + fix_size[0]), (x2 + fix_size[1], y2 + fix_size[0]), (0, 255, 0), 2)
 
             ret, buffer = cv2.imencode('.jpg', frame)
@@ -358,7 +342,6 @@ def delete_camera(camera_id: int, db: Session = Depends(get_db)):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'camera with id {id} is not available')
         url = camera.url
         if url in camera_info:
-            # Stop the thread and event associated with the camera's URL
             try:
                 camera_thread, stop_event = camera_info[url]["camera_thread"]
                 camera_info[url]["streaming_active"].clear()
@@ -367,10 +350,8 @@ def delete_camera(camera_id: int, db: Session = Depends(get_db)):
             except Exception as e:
                 print(f"Error occurred: {e}")
 
-            # Remove camera information from the dictionary
             del camera_info[url]
 
-        # Delete the camera from the database
         db.delete(camera)
         db.commit()
 
@@ -378,13 +359,6 @@ def delete_camera(camera_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Error occurred: {e}")
         time.sleep(2)
-# @app.get("/videos/{filename}")
-# async def get_video(filename: str):
-#     file_path = os.path.join(video_folder, filename)
-#     if os.path.exists(file_path):
-#         return StreamingResponse(open(file_path, "rb"), media_type="video/mp4")
-#     else:
-#         return {"error": "File not found"}
 
 @app.get("/videos/{filename}")
 async def get_video(filename: str):
@@ -393,7 +367,6 @@ async def get_video(filename: str):
         return StreamingResponse(open(file_path, "rb"), media_type="video/mp4")
     return {"error": "File not found"}
 
-# Define a route to stop video streaming for a specific camera URL
 @app.get("/stop_stream")
 async def stop_streaming(urllink = ""):
     global camera_info
@@ -403,14 +376,13 @@ async def stop_streaming(urllink = ""):
             print("Stopping thread"*10)
             print(url)
             print(urllink)
-            camera_info[url]["streaming_active"].clear()  # Stop streaming frames
+            camera_info[url]["streaming_active"].clear()
 
 async def stop_streaming_by_url(url = ""):
     global camera_info
     for url in camera_info:
         if(url == url):
-            camera_info[url]["streaming_active"].clear()  # Stop streaming frames
-# app.mount("/videos", StaticFiles(directory="videos"), name="videos")
+            camera_info[url]["streaming_active"].clear()
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
