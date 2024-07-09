@@ -106,7 +106,7 @@ def save_video(queue, db: Session, stop_event, detected: bool = False):
                 continue
 
             prev_frame_time = current_frame_time
-            results = model.predict(crop_frame, conf=0.42, device='cpu')[0]
+            results = model.predict(crop_frame, conf=0.42, device='cpu', classes=0)[0]
 
             person_detected = False
             for box in results.boxes:
@@ -207,7 +207,7 @@ def capture_frames(url, queue: Queue, stop_event, points):
             else:
                 crop_frame = frame
                 fix_size = [0, 0]
-            if queue.qsize() < 2:
+            if queue.qsize() < 5:
                 queue.put((frame, crop_frame, fix_size, url))
         cap.release()
         return
@@ -223,7 +223,7 @@ def generate_frames(queue: Queue, streaming_active: threading.Event, detected: b
                 print("Failed to capture frame")
                 continue
             if detected:
-                results = model.predict(crop_frame, conf=0.42, save=False, save_txt=False, show=False)[0]
+                results = model.predict(crop_frame, conf=0.42, save=False, save_txt=False, show=False, classes=0)[0]
                 for box in results.boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     label = box.cls
