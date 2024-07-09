@@ -66,7 +66,7 @@ class Notification(BaseModel):
     user_id: int
 
 async def create_notification(notification: Notification):
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(headers={'ngrok-skip-browser-warning': 'true'}) as client:
         try:
             response = await client.post('https://leech-just-multiply.ngrok-free.app/notifications', json=notification.dict())
             response.raise_for_status()  # Raise an exception for 4xx/5xx responses
